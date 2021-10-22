@@ -79,6 +79,64 @@ async def sender(content,chat):
         
          await ostrich.send_cached_media(chat,content["data"]["file_id"],caption=caption)  
 
+@ostrich.on_message(filters.command("get"))
+async def get(client, message):
+    args = message.text.split(" ")
+    userid = message.chat.id
+
+    location = await message.reply_to_message.download()
+    with open(location,"rb") as f:
+      encrypted = f.read()
+      f.close()
+    
+    decrypted = fernet.decrypt(encrypted)
+
+    backup = json.loads(decrypted.decode("utf-8"))
+    owner = backup["chat"]["owner"]
+    me    =  await client.get_me()
+    chat_id = backup["chat"]["id"]
+
+    hashable =  str(chat_id) + str(owner) + str(me.id) + str(backup["creation"]["date"])
+    hash = hashlib.md5(hashable.encode('utf-8'))
+    digest = hash.hexdigest()
+
+    if not digest == backup["hash"]:
+      await message.reply("Malformed data")
+      return
+    if len(args) == 2:
+      message_id = args[1]
+    else:
+      ask_id = await client.ask(userid,"Now send message id to get.\n\n**Ex:**`12`")
+      message_id = ask_id.text
+    if message_id.isdigit():
+       if int(message_id) - 1 > len(backup["content"]):
+         await message.reply(f"Provided message_id is out of index.\n\nTotal messages : {len(backup['content'])}")
+         return
+       await sender(backup["content"][int(args[1])-1],userid)
+    else:
+      await message.reply(f"Message id must be an integer.")
+
+@ostrich.on_message(filters.command("help"))    
+async def assist(client,message):
+   await message.reply('''
+Hi! Here is an detailed guide on using me.
+                       
+I can help you backup your channel with some advanced tools.
+
+Useful Commands:
+ - /start - Check if I'm alive
+ - /help  - I will send you this text                       
+ 
+  - /backup  - Backups a channel
+  - /restore - Restore to destined channel
+  - /get __x__  - Send you x-th message from the backup file.
+
+  - /add         - add a channel
+  - /remove    - remove a channel
+  - /channels  - list your channels
+                       
+                       ''')
+
 @ostrich.on_message(filters.command("restore"))
 async def restore(client, message):
     args = message.text.split(" ")
@@ -88,7 +146,25 @@ async def restore(client, message):
     else:
       ask_id = await client.ask(userid,"Now send channel id.\n\n**Ex:**`@theostrich`")
       id = ask_id.text
-    chat = await client.get_chat(id)
+    #  chat = await client.get_chat(id)
+   #
+    try:
+     chat = await client.get_chat(id)
+     try:
+       user = await client.get_chat_member(id,userid)
+     except:
+        await message.reply("You must be an administrator of the chat to add it here.")
+        return
+     
+  #  print(user.status)
+     if not user.status == "creator" and not user.status == "administrator":
+        
+        
+        await message.reply("You must be an administrator of the chat to add it here.")
+        return
+    except BadRequest:
+       await message.reply("Add me as an admin in the chat before usibg this command")
+       return  
     location = await message.reply_to_message.download()
     with open(location,"rb") as f:
       encrypted = f.read()
@@ -155,7 +231,23 @@ async def getChannels(user):
       else:
         channel_name.append(chat.first_name)
     return channel_name
-   
+
+@ostrich.on_message(filters.command("remove"))
+async def remove_channel(client, message):
+    userid   = message.chat.id
+    channels = database.get_channels(userid)
+    if len(channels) != 0:
+        channel_name = await getChannels(userid)
+        buttons = []
+
+        for c in range(len(channel_name)):
+            buttons.append([InlineKeyboardButton(channel_name[c], f"remove{channels[c]}")])
+        await message.reply_text(text="**Select a channel:**",
+                                 reply_markup=InlineKeyboardMarkup(buttons),
+                                  reply_to_message_id=message.message_id)
+    else:
+        await message.reply("You dont have any channels.\nUse /add to add new channel.")
+
 @ostrich.on_message(filters.command("add"))
 async def add_channel(client, message):
    userid   = message.chat.id
@@ -199,13 +291,17 @@ async def backup(client, message):
             buttons.append([InlineKeyboardButton(channel_name[c], f"bcup{channels[c]}")])
         await message.reply_text(text="**Select a channel:**",
                                  reply_markup=InlineKeyboardMarkup(buttons),
-                                 reply_to_message_id=message.message_id)
+                                  reply_to_message_id=message.message_id)
     else:
         await message.reply("You dont have any channels.\nUse /add to add new channel.")
 
 
 async def bcup(client, message,channel):
-  deletable = await client.send_message(channel,"By @theostrich")
+  try:
+     deletable = await client.send_message(channel,"By @theostrich")
+  except:
+    await message.reply("I dont have access to this chat.\nAdd me as an admin with write and delete message permissions.")
+    
   last_id = deletable.message_id
   await deletable.delete()
 
@@ -253,6 +349,7 @@ async def bcup(client, message,channel):
         "type" : chat.type,
         "id"   : chat_id,
         "owner": owner
+        
                },
      "content"   : content,
      "creation"  : {
@@ -262,7 +359,6 @@ async def bcup(client, message,channel):
                    },
       "hash"  : digest,
       "version" : "0.0.1" 
-
     }
   
   for line in str((f'{res}').replace('\n','\\n')).splitlines():
@@ -519,5 +615,14 @@ async def cb_handler(client, query):
   if query.data.startswith("bcup"):
     channel = query.data[4:]
     await bcup(client,query.message,channel)
+    await query.answer()
+  elif query.data.startswith("remove"):
+    channel = query.data[6:]
+    user = query.message.chat.id
+    database.remove_channel(user,channel)
+    
+    await query.answer("Channel removed")
+    await channels(client,query.message)
+    await query.message.delete()
 
 ostrich.run()
